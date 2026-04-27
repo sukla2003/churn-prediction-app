@@ -1,117 +1,111 @@
 from flask import Flask, render_template, request
-import pickle
+import joblib
 import pandas as pd
-from sqlalchemy import create_engine
 import os
-from urllib.parse import quote_plus
+from sqlalchemy import create_engine
 
-# -------------------------------
-# INIT APP
-# -------------------------------
 app = Flask(__name__)
 
-# -------------------------------
+# =========================
 # LOAD MODEL + COLUMNS
-# -------------------------------
-model = pickle.load(open('churn_model.pkl', 'rb'))
-columns = pickle.load(open('columns.pkl', 'rb'))
+# =========================
+model = joblib.load('churn_model.pkl')
+columns = joblib.load('columns.pkl')
 
-# -------------------------------
-# DATABASE CONNECTION
-# -------------------------------
-
-# If deploying later, this will be used
+# =========================
+# DATABASE CONNECTION (RENDER)
+# =========================
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if DATABASE_URL:
-    engine = create_engine(DATABASE_URL)
-else:
-    # 🔥 LOCAL DATABASE (change password if needed)
-    password = quote_plus("Sr@22102003")   # <-- your password
-    engine = create_engine(f"postgresql://postgres:{password}@localhost:5432/churn_db")
+# Fallback (your Render DB URL)
+if not DATABASE_URL:
+    DATABASE_URL = "postgresql://postgre:WyW4B4CseTdMfRTPkTV6roah03tzIn4J@dpg-d7np5giqqhas738271e0-a.ohio-postgres.render.com/churn_db_np39"
+
+engine = create_engine(DATABASE_URL)
 
 
-# -------------------------------
-# HOME ROUTE
-# -------------------------------
+# =========================
+# CREATE TABLE IF NOT EXISTS
+# =========================
+def create_table():
+    df = pd.DataFrame(columns=["tenure", "monthly", "total", "result"])
+    df.to_sql("predictions", engine, if_exists="replace", index=False)
+
+create_table()
+
+
+# =========================
+# HOME
+# =========================
 @app.route('/')
 def home():
     return render_template('index.html')
 
 
-# -------------------------------
-# PREDICT ROUTE
-# -------------------------------
+# =========================
+# PREDICT
+# =========================
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
-        data = request.form.to_dict()
+        tenure = float(request.form['tenure'])
+        monthly = float(request.form['MonthlyCharges'])
+        total = float(request.form['TotalCharges'])
 
-        print("FORM DATA:", data)
+        # Build full input for model
+        input_dict = {col: 0 for col in columns}
+        input_dict['tenure'] = tenure
+        input_dict['MonthlyCharges'] = monthly
+        input_dict['TotalCharges'] = total
 
-        # -------------------------------
-        # PREPARE INPUT FOR MODEL
-        # -------------------------------
-        input_data = []
+        input_df = pd.DataFrame([input_dict])
 
-        for col in columns:
-            value = data.get(col, 0)
-
-    # Handle categorical values (basic encoding)
-            if isinstance(value, str):
-                if value.lower() in ['yes', 'true']:
-                    value = 1
-                elif value.lower() in ['no', 'false']:
-                    value = 0
-                else:
-                    value = 0
-
-            try:
-                input_data.append(float(value))
-            except:
-                input_data.append(0)
-
-        # -------------------------------
-        # PREDICTION
-        # -------------------------------
-        prediction = model.predict([input_data])[0]
-        probability = model.predict_proba([input_data])[0][1]
-
+        prediction = model.predict(input_df)[0]
         result = "Churn" if prediction == 1 else "Stay"
 
         print("Prediction:", result)
 
-        # -------------------------------
-        # SAVE TO DATABASE
-        # -------------------------------
-        print("Saving to DB...")
-
+        # Save to DB
         df = pd.DataFrame([{
-            "tenure": float(data.get('tenure', 0)),
-            "monthly": float(data.get('MonthlyCharges', 0)),
-            "total": float(data.get('TotalCharges', 0)),
+            "tenure": tenure,
+            "monthly": monthly,
+            "total": total,
             "result": result
         }])
 
-        df.to_sql("predictions", engine, if_exists='append', index=False)
+        df.to_sql("predictions", engine, if_exists="append", index=False)
 
-        print("Saved successfully!")
+        print("Saved to DB")
 
-        # -------------------------------
-        # RETURN RESULT
-        # -------------------------------
-        return render_template(
-            'index.html',
-            prediction_text=f"Result: {result} (Probability: {round(probability, 2)})"
-        )
+        return result
 
     except Exception as e:
-        print("ERROR:", str(e))
-        return render_template('index.html', prediction_text="Something went wrong")
+        print("ERROR:", e)
+        return "Error"
 
 
-# -------------------------------
-# RUN APP
-# -------------------------------
+# =========================
+# STATS (FOR CHART)
+# =========================
+@app.route('/stats')
+def stats():
+    try:
+        df = pd.read_sql("SELECT * FROM predictions", engine)
+
+        churn = len(df[df['result'] == 'Churn'])
+        stay = len(df[df['result'] == 'Stay'])
+
+        print("Stats:", churn, stay)
+
+        return {"churn": churn, "stay": stay}
+
+    except Exception as e:
+        print("ERROR:", e)
+        return {"churn": 0, "stay": 0}
+
+
+# =========================
+# RUN
+# =========================
 if __name__ == "__main__":
-    app.run()
+    app.run(debug=True)
